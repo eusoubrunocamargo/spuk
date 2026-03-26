@@ -1,0 +1,27 @@
+# Ambiente Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Variáveis de ambiente — NUNCA commitar
+.env
+
+# Outputs gerados pelo pipeline — pesados e regeneráveis
+output/
+
+# Corpus e questões — não commitar arquivos de lei e dataset
+# (coloque-os manualmente após clonar o repositório)
+corpus/
+questoes/
+
+# Streamlit
+.streamlit/
+
+# Editores e SO
+.DS_Store
+.idea/
+.vscode/
+*.swp
