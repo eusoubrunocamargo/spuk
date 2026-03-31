@@ -17,7 +17,7 @@ from pathlib import Path
 def cmd_parse(args):
     from pipeline.parser import parse
 
-    resultado = parse(args.pdf)
+    resultado = parse(args.pdf, repair_path=args.repair)
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
@@ -25,7 +25,8 @@ def cmd_parse(args):
         encoding="utf-8"
     )
     total = len(resultado["cards"])
-    print(f"✓ {total} cards gerados → {args.output}")
+    ativos = sum(1 for c in resultado["cards"] if c.get("ativo"))
+    print(f"✓ {total} cards gerados ({ativos} ativos) → {args.output}")
 
 
 def cmd_analyze(args):
@@ -57,6 +58,11 @@ def main():
     p_parse = subparsers.add_parser("parse", help="Etapa 1: PDF da lei → JSON de cards")
     p_parse.add_argument("pdf", help="Caminho para o PDF (ex: corpus/lei_8429.pdf)")
     p_parse.add_argument("--output", "-o", required=True, help="JSON de saída")
+    p_parse.add_argument(
+        "--repair", "-r",
+        default=None,
+        help="JSON existente para preservar auditoria (auditoriaAprovada, auditadoEm, textoParentEnriquecido)",
+    )
 
     # --- analyze ---
     p_analyze = subparsers.add_parser("analyze", help="Etapa 3: questões → fingerprint de armadilhas")

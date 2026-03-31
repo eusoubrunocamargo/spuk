@@ -2,22 +2,26 @@
 dashboard.py — Dashboard de auditoria do SPUK-LEGIS
 Uso: streamlit run dashboard.py
 
-Carrega o output/lei_8429_cards.json, permite revisar card a card,
-editar campos conservadores do parser, aprovar ou rejeitar cada card,
-e persiste os campos `auditoriaAprovada` e `auditadoEm` de volta no JSON.
+Suporta múltiplos corpus (Lei 8.429, CF/88, etc.).
+O corpus ativo é selecionado na sidebar e o JSON correspondente
+é carregado de output/<sigla>_cards.json.
 """
 
 import json
+import re
 import streamlit as st
 import streamlit.components.v1 as components
 from pathlib import Path
 from datetime import datetime
 
 # ---------------------------------------------------------------------------
-# Configuração
+# Corpus disponíveis
 # ---------------------------------------------------------------------------
 
-JSON_PATH = Path("output/lei_8429_cards_v3.json")
+CORPUS = {
+    ##"Lei 8.429/1992 — Improbidade Administrativa": "output/lei_8429_cards.json",
+    "CF/88 — Constituição Federal":                "output/cf88_cards.json",
+}
 
 TIPOS_CARD = [
     "ARTIGO_COMPLETO",
@@ -31,19 +35,33 @@ TIPOS_CARD = [
 
 DIFICULDADES = ["FACIL", "MEDIO", "DIFICIL"]
 
+MATERIAS = [
+    "Direito Constitucional",
+    "Direito Administrativo",
+    "Direito Penal",
+    "Direito Civil",
+    "Direito Processual Civil",
+    "Direito Processual Penal",
+    "Direito Tributário",
+    "Direito do Trabalho",
+    "Direito Previdenciário",
+]
+
 # ---------------------------------------------------------------------------
-# Persistência
+# Persistência — usa o path do corpus ativo
 # ---------------------------------------------------------------------------
 
+def json_path() -> Path:
+    return Path(st.session_state.get("corpus_path", list(CORPUS.values())[0]))
+
+
 def load_data() -> dict:
-    """Carrega o JSON do disco. Chamado uma vez por sessão."""
-    with open(JSON_PATH, encoding="utf-8") as f:
+    with open(json_path(), encoding="utf-8") as f:
         return json.load(f)
 
 
 def save_data(data: dict):
-    """Persiste o JSON inteiro de volta ao disco."""
-    with open(JSON_PATH, "w", encoding="utf-8") as f:
+    with open(json_path(), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
@@ -51,12 +69,22 @@ def save_data(data: dict):
 # Inicialização do estado da sessão
 # ---------------------------------------------------------------------------
 
-def init_state():
+def init_state(corpus_path: str):
+    """
+    Inicializa (ou reinicializa) o estado da sessão para o corpus ativo.
+    Se o corpus mudou, descarrega os dados anteriores e recarrega o novo.
+    """
+    if st.session_state.get("corpus_path") != corpus_path:
+        # Corpus mudou: descarta tudo e recarrega
+        st.session_state.corpus_path = corpus_path
+        st.session_state.pop("data", None)
+        st.session_state.pop("idx", None)
+        st.session_state.saved_msg = ""
+
     if "data" not in st.session_state:
         st.session_state.data = load_data()
 
     if "idx" not in st.session_state:
-        # Abre na primeira card ainda não auditada, ou na 0 se todas já foram
         cards = st.session_state.data["cards"]
         pendentes = [i for i, c in enumerate(cards) if not c.get("auditoriaAprovada")]
         st.session_state.idx = pendentes[0] if pendentes else 0
@@ -93,6 +121,23 @@ def navigate(delta: int):
     st.session_state.saved_msg = ""
 
 
+# Padrões que indicam referência cruzada dentro do textoParent.
+# Ex: "O imposto previsto no inciso III", "nos termos do art. 5º"
+_CROSS_REF_RE = re.compile(
+    r'\b(?:previsto|referido|mencionado|constante|disposto|'
+    r'nos\s+termos|na\s+forma)\s+(?:no|nos|na|nas|do|dos|da|das)?\s*'
+    r'(?:inciso|art\.?|artigo|parágrafo|§|alínea)',
+    re.IGNORECASE,
+)
+
+
+def _has_cross_ref(texto: str | None) -> bool:
+    """Retorna True se o texto contém referência a outro dispositivo da lei."""
+    if not texto:
+        return False
+    return bool(_CROSS_REF_RE.search(texto))
+
+
 def apply_and_save(card: dict, updates: dict, aprovada: bool):
     """
     Aplica as edições ao card, seta os campos de auditoria e persiste.
@@ -110,9 +155,30 @@ def apply_and_save(card: dict, updates: dict, aprovada: bool):
 # ---------------------------------------------------------------------------
 
 def render_sidebar(cards: list):
-    """Painel lateral com progresso e navegação rápida."""
-    st.sidebar.title("SPUK-LEGIS")
-    st.sidebar.caption("Auditoria de cards")
+    """Painel lateral com seletor de corpus, progresso e navegação rápida."""
+    st.sidebar.title("SPUK — Auditoria")
+
+    # --- Seletor de corpus ---
+    corpus_labels = list(CORPUS.keys())
+    corpus_atual_path = st.session_state.get("corpus_path", list(CORPUS.values())[0])
+    corpus_atual_label = next(
+        (k for k, v in CORPUS.items() if v == corpus_atual_path),
+        corpus_labels[0]
+    )
+    escolha_corpus = st.sidebar.selectbox(
+        "Corpus",
+        corpus_labels,
+        index=corpus_labels.index(corpus_atual_label),
+    )
+    novo_path = CORPUS[escolha_corpus]
+    if novo_path != corpus_atual_path:
+        if not Path(novo_path).exists():
+            st.sidebar.error(f"Arquivo não encontrado: `{novo_path}`")
+        else:
+            st.session_state.corpus_path = novo_path
+            st.rerun()
+
+    st.sidebar.divider()
 
     total = total_cards()
     auditados = count_auditados()
@@ -173,13 +239,16 @@ def render_sidebar(cards: list):
 
 
 def render_preview(contexto: str, texto_parent: str | None, texto: str,
-                   tipo: str, dificuldade: str):
+                   tipo: str, dificuldade: str,
+                   texto_chain: str = "",
+                   texto_parent_enriquecido: str | None = None):
     """
     Renderiza uma simulação visual de como o card aparece para o usuário final.
 
-    Quando textoParent está presente (INCISO_COM_CAPUT), exibe-o em estilo
-    suave entre o header de contexto e o texto julgável — exatamente como
-    o app mostrará o caput ou parágrafo pai antes do inciso testável.
+    Prioridade do bloco pai exibido:
+      1. textoParentEnriquecido (referência cruzada resolvida manualmente)
+      2. textoChain (cadeia hierárquica completa: avô > pai)
+      3. textoParent (pai imediato — comportamento original)
     """
     dif_cores = {"FACIL": "#4CAF50", "MEDIO": "#FF9800", "DIFICIL": "#FF4D4D"}
     dif_cor = dif_cores.get(dificuldade, "#888")
@@ -189,15 +258,16 @@ def render_preview(contexto: str, texto_parent: str | None, texto: str,
 
     tipo_label = tipo.replace("_", " ")
 
+    texto_pai = texto_parent_enriquecido or texto_chain or texto_parent or ""
     parent_block = ""
-    if texto_parent:
+    if texto_pai:
         parent_block = f"""
         <p style="
             font-size: 12px; font-weight: 400; color: #888;
             line-height: 1.55; margin: 0 0 14px 0;
             padding: 10px 12px; background: #222;
             border-radius: 10px; border-left: 3px solid #FF4D4D;
-        ">{esc(texto_parent)}</p>"""
+        ">{esc(texto_pai)}</p>"""
 
     html = f"""
     <div style="display:flex; flex-direction:column; align-items:center; padding:8px 0 16px 0;">
@@ -282,7 +352,7 @@ def render_card_editor(card: dict):
     col_form, col_prev_panel = st.columns([1, 1], gap="large")
 
     with col_form:
-        # --- Campos editáveis ---
+        # --- Campos de classificação ---
         novo_tipo = st.selectbox(
             "Tipo",
             TIPOS_CARD,
@@ -307,23 +377,66 @@ def render_card_editor(card: dict):
             index=DIFICULDADES.index(card["dificuldade"]) if card["dificuldade"] in DIFICULDADES else 1,
         )
 
-        # Texto original — somente leitura, pois é o texto normativo bruto
-        st.text_area(
-            "textoOriginal  (somente leitura)",
-            value=card["textoOriginal"],
-            height=120,
-            disabled=True,
-            help="Texto extraído diretamente da lei. Alterações aqui devem ser feitas diretamente no JSON.",
+        nova_materia = st.selectbox(
+            "Matéria",
+            MATERIAS,
+            index=MATERIAS.index(card["materiaNome"]) if card.get("materiaNome") in MATERIAS else 0,
         )
 
-        # textoParent — exibido somente quando preenchido (incisos com caput)
+        st.divider()
+
+        # --- Campos textuais editáveis ---
+        novo_texto_original = st.text_area(
+            "textoOriginal",
+            value=card["textoOriginal"],
+            height=120,
+            help="Texto extraído da lei. Edite apenas para corrigir erros de extração do PDF.",
+        )
+
+        # textoChain — exibido quando não vazio (cards com hierarquia)
+        novo_texto_chain = card.get("textoChain", "")
+        if novo_texto_chain or card.get("textoParent"):
+            novo_texto_chain = st.text_input(
+                "textoChain  (cadeia hierárquica: avô > pai)",
+                value=novo_texto_chain,
+                help="Concatenação de todos os ancestrais. Gerado automaticamente; edite se a cadeia estiver incompleta.",
+            )
+
+        # textoParent — exibido quando presente
+        novo_texto_parent = card.get("textoParent") or ""
         if card.get("textoParent"):
-            st.text_area(
-                "textoParent  (somente leitura)",
+            novo_texto_parent = st.text_area(
+                "textoParent  (pai imediato)",
                 value=card["textoParent"],
                 height=80,
-                disabled=True,
-                help="Texto do caput ou parágrafo pai exibido acima do inciso no app.",
+                help="Texto do caput ou parágrafo pai. Edite apenas para corrigir erros de extração.",
+            )
+
+        # textoParentEnriquecido — sempre visível quando o card tem pai;
+        # badge de alerta automático quando referência cruzada é detectada.
+        novo_texto_parent_enriquecido = card.get("textoParentEnriquecido") or ""
+        if card.get("textoParent") or card.get("textoChain"):
+            tem_cross_ref = _has_cross_ref(card.get("textoParent"))
+            ja_enriquecido = bool(card.get("textoParentEnriquecido"))
+
+            if tem_cross_ref and not ja_enriquecido:
+                st.warning(
+                    "⚠️ **Referência cruzada detectada** — o textoParent menciona outro "
+                    "dispositivo da lei. Preencha o campo abaixo com o contexto resolvido "
+                    "para que o estudante consiga julgar o card sem consultar o artigo referenciado.",
+                    icon=None,
+                )
+
+            novo_texto_parent_enriquecido = st.text_area(
+                "textoParentEnriquecido  (contexto resolvido para o app)",
+                value=novo_texto_parent_enriquecido,
+                height=100,
+                help=(
+                    "Deixe vazio para usar textoChain/textoParent na preview. "
+                    "Preencha quando o textoParent faz referência a outro artigo e "
+                    "o estudante precisaria conhecê-lo para julgar o card. "
+                    "Ex: 'O imposto previsto no inciso III (renda e proventos de qualquer natureza)'"
+                ),
             )
 
         novo_ativo = st.checkbox(
@@ -339,10 +452,12 @@ def render_card_editor(card: dict):
         # em tempo real antes de qualquer save.
         render_preview(
             contexto=novo_contexto,
-            texto_parent=card.get("textoParent"),
-            texto=card["textoOriginal"],
+            texto_parent=novo_texto_parent or card.get("textoParent"),
+            texto=novo_texto_original,
             tipo=novo_tipo,
             dificuldade=nova_dificuldade,
+            texto_chain=novo_texto_chain,
+            texto_parent_enriquecido=novo_texto_parent_enriquecido or None,
         )
 
     st.divider()
@@ -353,8 +468,14 @@ def render_card_editor(card: dict):
     updates = {
         "tipo": novo_tipo,
         "textoContexto": novo_contexto,
+        "textoOriginal": novo_texto_original,
+        "textoParent": novo_texto_parent or card.get("textoParent"),
+        "textoChain": novo_texto_chain,
+        # Salva None quando vazio, para não poluir o JSON com strings vazias
+        "textoParentEnriquecido": novo_texto_parent_enriquecido or None,
         "assuntoNome": novo_assunto,
         "dificuldade": nova_dificuldade,
+        "materiaNome": nova_materia,
         "ativo": novo_ativo,
     }
 
@@ -394,17 +515,28 @@ def render_card_editor(card: dict):
 
 def main():
     st.set_page_config(
-        page_title="SPUK-LEGIS — Auditoria",
+        page_title="SPUK — Auditoria",
         layout="wide",
         initial_sidebar_state="expanded",
     )
 
-    if not JSON_PATH.exists():
-        st.error(f"Arquivo não encontrado: `{JSON_PATH}`")
-        st.info("Execute primeiro: `python main.py parse corpus/lei_8429.pdf --output output/lei_8429_cards.json`")
+    # Corpus padrão: primeiro da lista
+    corpus_path = st.session_state.get("corpus_path", list(CORPUS.values())[0])
+
+    if not Path(corpus_path).exists():
+        st.error(f"Arquivo não encontrado: `{corpus_path}`")
+        st.info("Execute o parser para gerar o JSON do corpus selecionado.")
+        # Ainda renderiza a sidebar para permitir trocar o corpus
+        st.sidebar.title("SPUK — Auditoria")
+        corpus_labels = list(CORPUS.keys())
+        escolha = st.sidebar.selectbox("Corpus", corpus_labels)
+        novo = CORPUS[escolha]
+        if novo != corpus_path:
+            st.session_state.corpus_path = novo
+            st.rerun()
         st.stop()
 
-    init_state()
+    init_state(corpus_path)
 
     cards = st.session_state.data["cards"]
     render_sidebar(cards)
