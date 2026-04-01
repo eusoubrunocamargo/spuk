@@ -17,21 +17,32 @@ from pathlib import Path
 
 # Marcadores que indicam o início de um novo elemento estrutural da lei.
 # Uma linha que começa com qualquer um desses padrões NÃO é continuação.
+# Suporta Lei 8.429 (hífen nos incisos) e CF/88 (en dash nos incisos).
 STRUCTURAL_MARKERS = re.compile(
     r'^(?:'
+    r'TÍTULO\s|'                    # TÍTULO I  (CF/88)
     r'CAPÍTULO\s|'                  # CAPÍTULO I
     r'Seção\s|'                     # Seção I, Seção II-A
+    r'Subseção\s|'                  # Subseção I (CF/88)
     r'Arts?\.\s+\d|'                # Art. 1º, Art. 8º-A, Arts. 4º a 6º
     r'§\s+\d|'                      # § 1º, § 2º
     r'Parágrafo único\.|'           # Parágrafo único.
-    r'[IVXLCDM]+\s+-\s|'           # I - , XIV - (incisos)
+    r'[IVXLCDM]+\s+[–-]\s|'        # I – ou I - (en dash CF/88 ou hífen Lei 8.429)
     r'[a-z]\)\s'                    # a) b) c) (alíneas)
     r')'
 )
 
-# Linha que marca o início do texto normativo propriamente dito.
-# Tudo antes dela (cabeçalho, título, preâmbulo) é descartado.
-INICIO_NORMATIVO = re.compile(r'^CAPÍTULO\s')
+# Linha que marca o início do texto normativo.
+# Para a Lei 8.429: primeiro CAPÍTULO.
+# Para a CF/88: primeiro TÍTULO (que vem antes dos capítulos).
+INICIO_NORMATIVO = re.compile(r'^(?:TÍTULO|CAPÍTULO)\s')
+
+# Cabeçalhos de página da CF/88 — número de página + nome do documento
+# Ex: "12 Constituição da República Federativa do Brasil"
+#     "Dos Direitos e Garantias Fundamentais 13"
+CABECALHO_CF = re.compile(
+    r'^(?:\d+\s+Constituição|.+\d+$|^Constituição da República)'
+)
 
 # Notas legislativas entre parênteses.
 # Cobre todos os padrões observados no PDF da Câmara:
@@ -55,11 +66,11 @@ ARTS_REVOGADOS = re.compile(r'^Arts?\.\s+.*[Rr]evogad', re.IGNORECASE)
 # Exemplos: "§ 1º", "I -", "Parágrafo único.", "a)"
 ROTULO_NU = re.compile(
     r'^(?:'
-    r'Art\.\s+\d+[ºo°]?(?:-[A-Z])?\.?\s*|'  # Art. 17-A.  (artigo vetado/sem conteúdo)
+    r'Art\.\s+\d+[ºo°]?(?:-[A-Z])?\.?\s*|'  # Art. 17-A.
     r'§\s+\d+[ºo°]?(?:-[A-Z])?\.?\s*|'       # § 1º  ou  § 10-A.
-    r'[IVXLCDM]+\s+-\s*|'                     # I -   ou  XIV -
-    r'Parágrafo único\.?\s*|'                 # Parágrafo único.
-    r'[a-z]\)\s*'                             # a)
+    r'[IVXLCDM]+\s+[–-]\s*|'                  # I –  ou  XIV -
+    r'Parágrafo único\.?\s*|'                  # Parágrafo único.
+    r'[a-z]\)\s*'                              # a)
     r')[;,\.\s]*$',
     re.IGNORECASE
 )
@@ -70,10 +81,18 @@ HEADER_LINES = {
     'Centro de Documentação e Informação',
     'O PRESIDENTE DA REPÚBLICA',
     'Faço saber que o Congresso Nacional decreta e eu sanciono a seguinte lei:',
+    '* NE: ver Atos Internacionais Equivalentes a Emenda Constitucional.',
 }
 
 # Título do diploma legal — também é cabeçalho, não conteúdo normativo
 TITULO_LEI = re.compile(r'^LEI\s+N[ºo°]\s+\d')
+
+# Cabeçalhos de página da CF/88:
+#   "12 Constituição da República Federativa do Brasil"  (margem esquerda)
+#   "Dos Direitos e Garantias Fundamentais 13"           (margem direita)
+CABECALHO_CF = re.compile(
+    r'^(?:\d+\s+Constituição|\w[\w\s]+\d+$)'
+)
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +190,9 @@ def clean_text(raw_text: str) -> list:
             continue
         if TITULO_LEI.match(stripped):
             continue
+        # Descarta cabeçalhos de página da CF/88
+        if CABECALHO_CF.match(stripped):
+            continue
 
         # Descarta artigos revogados em bloco (ex: "Arts. 4º a 6º (Revogados...)")
         if ARTS_REVOGADOS.match(stripped):
@@ -211,8 +233,10 @@ class Token:
 
 
 # Constantes de tipo — espelham a hierarquia legislativa brasileira
+T_TITULO          = "TITULO"       # CF/88: TÍTULO I
 T_CAPITULO        = "CAPITULO"
 T_SECAO           = "SECAO"
+T_SUBSECAO        = "SUBSECAO"     # CF/88: Subseção I
 T_ART_CAPUT       = "ART_CAPUT"
 T_PARAGRAFO_UNICO = "PARAGRAFO_UNICO"
 T_PARAGRAFO       = "PARAGRAFO"
@@ -222,38 +246,34 @@ T_ALINEA          = "ALINEA"
 
 # Regexes de tokenização — cada padrão captura (rotulo, texto) nos grupos 1 e 2.
 # A ordem de declaração importa: os mais específicos vêm antes dos mais genéricos.
+# [–-] casa tanto com en dash (CF/88) quanto hífen (Lei 8.429).
 _PATTERNS = [
+    # TÍTULO I  Dos Princípios Fundamentais  (CF/88)
+    (T_TITULO,          re.compile(r'^(TÍTULO\s+[IVXLCDM]+)\s+(.+)$')),
+
     # CAPÍTULO I DAS DISPOSIÇÕES GERAIS
-    # grupo 1: "CAPÍTULO I"   grupo 2: "DAS DISPOSIÇÕES GERAIS"
     (T_CAPITULO,        re.compile(r'^(CAPÍTULO\s+[IVXLCDM]+)\s+(.+)$')),
 
-    # Seção I  Dos Atos de Improbidade...
-    # Seção II-A  (se existir)
-    # grupo 1: "Seção I"   grupo 2: título da seção
+    # Seção I  Dos Atos de Improbidade...  /  Seção II-A
     (T_SECAO,           re.compile(r'^(Seção\s+\S+)\s+(.+)$')),
 
-    # Art. 1º texto...  |  Art. 8º-A texto...  |  Art. 10. texto...  |  Art. 17-B. texto...
-    # O ponto final do numeral decimal (Art. 10.) é capturado pelo \.? opcional.
-    # grupo 1: "Art. 10"   grupo 2: texto do caput
+    # Subseção I  Da ... (CF/88)
+    (T_SUBSECAO,        re.compile(r'^(Subseção\s+\S+)\s+(.+)$')),
+
+    # Art. 1º texto...  |  Art. 8º-A texto...  |  Art. 10. texto...
     (T_ART_CAPUT,       re.compile(r'^(Art\.\s+\d+[ºo°]?(?:-[A-Z])?\.?)\s+(.+)$')),
 
     # Parágrafo único. texto...
-    # grupo 1: "Parágrafo único"   grupo 2: texto
     (T_PARAGRAFO_UNICO, re.compile(r'^(Parágrafo único)\.\s+(.+)$')),
 
-    # § 1º texto...  |  § 10. texto...  |  § 10-A. texto...  |  § 10-B. texto...
-    # O \.? final captura o ponto decimal nos parágrafos acima do nono.
-    # grupo 1: "§ 10"   grupo 2: texto
+    # § 1º texto...  |  § 10. texto...  |  § 10-A. texto...
     (T_PARAGRAFO,       re.compile(r'^(§\s+\d+[ºo°]?(?:-[A-Z])?\.?)\s+(.+)$')),
 
-    # I - texto...   XIV - texto...   (algarismos romanos maiúsculos)
-    # grupo 1: "I"   grupo 2: texto do inciso
-    # Atenção: o regex exige pelo menos 1 caractere de conteúdo após o traço
-    # para não casar com rótulos nus que escaparam da limpeza.
-    (T_INCISO,          re.compile(r'^([IVXLCDM]+)\s+-\s+(.+)$')),
+    # I – texto (CF/88, en dash)  ou  I - texto (Lei 8.429, hífen)
+    # [–-] cobre ambos; requer conteúdo após o traço para evitar rótulos nus.
+    (T_INCISO,          re.compile(r'^([IVXLCDM]+)\s+[–-]\s+(.+)$')),
 
     # a) texto...   b) texto...
-    # grupo 1: "a"   grupo 2: texto da alínea
     (T_ALINEA,          re.compile(r'^([a-z])\)\s+(.+)$')),
 ]
 
@@ -339,7 +359,17 @@ def _group_articles(tokens: list) -> list:
     ctx_secao = ""
 
     for token in tokens:
-        if token.tipo == T_CAPITULO:
+        if token.tipo == T_TITULO:
+            # Novo título (CF/88): salva grupo em andamento, reseta capítulo e seção
+            if current_group:
+                groups.append(current_group)
+                current_group = None
+            ctx_capitulo = token.titulo   # usa o nome do título como contexto
+            ctx_secao = ""
+            current_parent_token = None
+            current_inciso_token = None
+
+        elif token.tipo == T_CAPITULO:
             if current_group:
                 groups.append(current_group)
                 current_group = None
@@ -349,6 +379,15 @@ def _group_articles(tokens: list) -> list:
             current_inciso_token = None
 
         elif token.tipo == T_SECAO:
+            if current_group:
+                groups.append(current_group)
+                current_group = None
+            ctx_secao = token.titulo
+            current_parent_token = None
+            current_inciso_token = None
+
+        elif token.tipo == T_SUBSECAO:
+            # Subseção refina o contexto dentro da seção atual
             if current_group:
                 groups.append(current_group)
                 current_group = None
@@ -443,6 +482,23 @@ def _make_texto_contexto(art_rotulo: str, ctx_secao: str, ctx_capitulo: str) -> 
     return art_rotulo
 
 
+def _build_chain(*textos) -> str:
+    """
+    Monta o campo `textoChain`: concatena os textos ancestrais com ' > ',
+    descartando entradas vazias ou None.
+
+    Exemplos:
+        _build_chain("São brasileiros", "natos")
+            → "São brasileiros > natos"
+        _build_chain("Compete à União instituir impostos sobre")
+            → "Compete à União instituir impostos sobre"
+        _build_chain(None, "")
+            → ""
+    """
+    partes = [t for t in textos if t]
+    return " > ".join(partes)
+
+
 def _cards_from_group(group: ArticleGroup, ordem_inicial: int) -> tuple:
     """
     Aplica a árvore de decisão a um ArticleGroup e retorna:
@@ -451,7 +507,7 @@ def _cards_from_group(group: ArticleGroup, ordem_inicial: int) -> tuple:
     Árvore de decisão:
     - Caput sem filhos                        → ARTIGO_COMPLETO
     - Caput com filhos e termina em '.'       → CAPUT_ISOLADO (+ cards dos filhos)
-    - Caput com filhos e termina em ':'       → sem card do caput; incisos → INCISO_COM_CAPUT
+    - Caput com filhos e termina em ':'       → CAPUT_ISOLADO (texto sem ':') + incisos INCISO_COM_CAPUT
     - Parágrafo (qualquer)                    → PARAGRAFO_ISOLADO (padrão revisável)
     - Inciso de parágrafo                     → INCISO_COM_CAPUT (parágrafo = contexto)
     """
@@ -469,6 +525,11 @@ def _cards_from_group(group: ArticleGroup, ordem_inicial: int) -> tuple:
     # Monta o assunto a partir da seção (o revisor vai refinar)
     assunto = group.contexto_secao or group.contexto_capitulo
 
+    # Texto base do caput sem o ":" final.
+    # Usado como textoParent dos incisos E como textoOriginal do card do caput
+    # quando o caput termina em ':' (remove a pontuação introdutória da lista).
+    caput_base = caput.texto.rstrip(':').rstrip()
+
     # --- Card do caput ---
     if not tem_incisos and not tem_paragrafos:
         # Artigo simples: apenas o caput, sem filhos → ARTIGO_COMPLETO
@@ -477,6 +538,8 @@ def _cards_from_group(group: ArticleGroup, ordem_inicial: int) -> tuple:
             "tipo": "ARTIGO_COMPLETO",
             "textoContexto": texto_ctx,
             "textoParent": None,
+            "textoChain": "",
+            "textoParentEnriquecido": None,
             "textoOriginal": caput.texto,
             "materiaNome": "Direito Administrativo",
             "assuntoNome": assunto,
@@ -487,14 +550,19 @@ def _cards_from_group(group: ArticleGroup, ordem_inicial: int) -> tuple:
         })
         ordem += 1
 
-    elif not caput_fecha_com_dois_pontos:
-        # Caput termina em '.': é uma proposição independente e testável → CAPUT_ISOLADO
+    else:
+        # Caput com filhos: sempre gera CAPUT_ISOLADO.
+        # Se termina em ':' usa caput_base (sem os dois-pontos) como textoOriginal,
+        # pois o card deve ser julgável como proposição autônoma.
+        texto_caput_card = caput_base if caput_fecha_com_dois_pontos else caput.texto
         cards.append({
             "referencia": _make_referencia(caput.rotulo),
             "tipo": "CAPUT_ISOLADO",
             "textoContexto": texto_ctx,
             "textoParent": None,
-            "textoOriginal": caput.texto,
+            "textoChain": "",
+            "textoParentEnriquecido": None,
+            "textoOriginal": texto_caput_card,
             "materiaNome": "Direito Administrativo",
             "assuntoNome": assunto,
             "dificuldade": "MEDIO",
@@ -503,10 +571,6 @@ def _cards_from_group(group: ArticleGroup, ordem_inicial: int) -> tuple:
             "variantes": [],
         })
         ordem += 1
-    # Se caput_fecha_com_dois_pontos: não gera card do caput (ele só é contexto)
-
-    # Texto base do caput sem o ":" final — torna-se textoParent dos incisos.
-    caput_base = caput.texto.rstrip(':').rstrip()
 
     # --- Cards dos incisos do caput ---
     for inciso in group.incisos_do_caput:
@@ -518,6 +582,8 @@ def _cards_from_group(group: ArticleGroup, ordem_inicial: int) -> tuple:
             "tipo": tipo_inciso,
             "textoContexto": texto_ctx,
             "textoParent": caput_base if tipo_inciso == "INCISO_COM_CAPUT" else None,
+            "textoChain": _build_chain(caput_base) if tipo_inciso == "INCISO_COM_CAPUT" else "",
+            "textoParentEnriquecido": None,
             "textoOriginal": inciso.texto,
             "materiaNome": "Direito Administrativo",
             "assuntoNome": assunto,
@@ -539,6 +605,8 @@ def _cards_from_group(group: ArticleGroup, ordem_inicial: int) -> tuple:
                 "tipo": "ALINEA_COM_INCISO_E_CAPUT",
                 "textoContexto": texto_ctx,
                 "textoParent": inciso_base,
+                "textoChain": _build_chain(caput_base, inciso_base),
+                "textoParentEnriquecido": None,
                 "textoOriginal": alinea.texto,
                 "materiaNome": "Direito Administrativo",
                 "assuntoNome": assunto,
@@ -563,6 +631,8 @@ def _cards_from_group(group: ArticleGroup, ordem_inicial: int) -> tuple:
             "tipo": "PARAGRAFO_ISOLADO",
             "textoContexto": texto_ctx,
             "textoParent": None,
+            "textoChain": "",
+            "textoParentEnriquecido": None,
             "textoOriginal": para.texto,
             "materiaNome": "Direito Administrativo",
             "assuntoNome": assunto,
@@ -584,6 +654,8 @@ def _cards_from_group(group: ArticleGroup, ordem_inicial: int) -> tuple:
                 "tipo": "INCISO_COM_CAPUT",
                 "textoContexto": ctx_para,
                 "textoParent": para_base,
+                "textoChain": _build_chain(para_base),
+                "textoParentEnriquecido": None,
                 "textoOriginal": inciso.texto,
                 "materiaNome": "Direito Administrativo",
                 "assuntoNome": assunto,
@@ -604,6 +676,8 @@ def _cards_from_group(group: ArticleGroup, ordem_inicial: int) -> tuple:
                     "tipo": "ALINEA_COM_INCISO_E_CAPUT",
                     "textoContexto": ctx_para,
                     "textoParent": inciso_base,
+                    "textoChain": _build_chain(para_base, inciso_base),
+                    "textoParentEnriquecido": None,
                     "textoOriginal": alinea.texto,
                     "materiaNome": "Direito Administrativo",
                     "assuntoNome": assunto,
@@ -642,42 +716,94 @@ def build_cards(tokens: list) -> dict:
     }
 
 
+def _apply_repair(cards: list, repair_path: str) -> list:
+    """
+    Transfere campos de auditoria de um JSON existente para os cards recém-gerados.
+
+    Campos transferidos quando a referência bate:
+        auditoriaAprovada, auditadoEm, textoParentEnriquecido
+
+    Campos NOT transferidos (recalculados pelo novo parse):
+        textoOriginal, textoParent, textoChain, ativo, ordemEstudo
+
+    Permite re-parsear um corpus sem perder o trabalho de auditoria humana.
+    """
+    import json
+
+    with open(repair_path, encoding="utf-8") as f:
+        repair_data = json.load(f)
+
+    repair_index = {
+        card["referencia"]: card
+        for card in repair_data.get("cards", [])
+    }
+
+    CAMPOS_REPAIR = ["auditoriaAprovada", "auditadoEm", "textoParentEnriquecido"]
+
+    transferidos = 0
+    for card in cards:
+        fonte = repair_index.get(card["referencia"])
+        if fonte:
+            for campo in CAMPOS_REPAIR:
+                if campo in fonte:
+                    card[campo] = fonte[campo]
+            transferidos += 1
+
+    print(f"  → repair: {transferidos}/{len(cards)} cards com auditoria preservada")
+    return cards
+
+
 # ---------------------------------------------------------------------------
 # Ponto de entrada
 # ---------------------------------------------------------------------------
 
-def parse(pdf_path: str) -> dict:
+def parse(pdf_path: str, repair_path: str = None) -> dict:
     """
     Pipeline completo: PDF → JSON de cards.
     Encadeia as quatro fases e retorna o dicionário pronto para serialização.
+
+    Se repair_path for informado, os campos de auditoria (auditoriaAprovada,
+    auditadoEm, textoParentEnriquecido) são preservados do JSON anterior.
     """
-    raw   = extract_text(pdf_path)
-    lines = clean_text(raw)
+    raw    = extract_text(pdf_path)
+    lines  = clean_text(raw)
     tokens = tokenize(lines)
-    return build_cards(tokens)
+    resultado = build_cards(tokens)
+
+    if repair_path:
+        resultado["cards"] = _apply_repair(resultado["cards"], repair_path)
+
+    return resultado
 
 
 def main():
     """
-    CLI: python parser.py <caminho_do_pdf> [--output <arquivo.json>]
+    CLI: python parser.py <caminho_do_pdf> [--output <arquivo.json>] [--repair <arquivo.json>]
     Se --output for omitido, imprime na saída padrão.
+    Se --repair for informado, preserva campos de auditoria do JSON existente.
     """
     import argparse
     import json
 
-    ap = argparse.ArgumentParser(description="Parser da Lei 8.429/92 — SPUK-LEGIS")
-    ap.add_argument("pdf", help="Caminho para o PDF da lei (ex: corpus/lei_8429.pdf)")
+    ap = argparse.ArgumentParser(description="Parser SPUK-LEGIS — PDF → JSON de cards")
+    ap.add_argument("pdf", help="Caminho para o PDF da lei (ex: corpus/cf88.pdf)")
     ap.add_argument("--output", "-o", help="Arquivo JSON de saída (padrão: stdout)")
+    ap.add_argument(
+        "--repair", "-r",
+        help="JSON existente para preservar campos de auditoria (auditoriaAprovada, auditadoEm, textoParentEnriquecido)",
+        default=None,
+    )
     args = ap.parse_args()
 
-    resultado = parse(args.pdf)
+    resultado = parse(args.pdf, repair_path=args.repair)
 
     json_str = json.dumps(resultado, ensure_ascii=False, indent=2)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(json_str)
         total = len(resultado["cards"])
-        print(f"✓ {total} cards gerados → {args.output}")
+        ativos = sum(1 for c in resultado["cards"] if c.get("ativo"))
+        print(f"✓ {total} cards gerados ({ativos} ativos) → {args.output}")
     else:
         print(json_str)
 
