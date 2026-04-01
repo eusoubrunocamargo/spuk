@@ -29,15 +29,23 @@ def cmd_parse(args):
 
 
 def cmd_analyze(args):
-    # Implementado na Etapa 3
-    print("[analyze] Ainda não implementado. Execute após a revisão humana do JSON de cards.")
-    sys.exit(1)
+    from pipeline.analyzer import analyze
+    analyze(
+        cards_path=args.cards_json,
+        questoes_path=args.questoes,
+        output_path=args.output,
+        verbose=True,
+    )
 
 
 def cmd_generate(args):
-    # Implementado na Etapa 4
-    print("[generate] Ainda não implementado. Execute após o analyzer.")
-    sys.exit(1)
+    from pipeline.generator import generate
+    generate(
+        cards_path=args.cards_json,
+        fingerprint_path=args.fingerprint,
+        output_path=args.output,
+        verbose=True,
+    )
 
 
 def cmd_export(args):
