@@ -26,8 +26,8 @@ from datetime import datetime
 # ---------------------------------------------------------------------------
 
 CORPUS = {
-    "Lei 8.429/1992 — Improbidade Administrativa": "output/lei_8429_full.json",
-    #"CF/88 — Constituição Federal":                "output/cf88_cards.json",
+    #"Lei 8.429/1992 — Improbidade Administrativa": "output/lei_8429_full.json",
+    "CF/88 — Constituição Federal":                "output/cf88_cards.json",
 }
 
 TIPOS_CARD = [
